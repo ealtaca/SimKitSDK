@@ -10,13 +10,13 @@ Add to your Package.swift:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/ealtaca/SimKit.git", from: "1.0.0")
+    .package(url: "https://github.com/ealtaca/SimKitSDK.git", from: "1.0.0")
 ]
 ```
 
 Or in Xcode:
 1. File > Add Package Dependencies
-2. URL: `https://github.com/ealtaca/SimKit.git`
+2. URL: `https://github.com/ealtaca/SimKitSDK.git`
 3. Version: 1.0.0
 
 ## Usage
