@@ -1,11 +1,12 @@
 // swift-tools-version:5.9
+// SimKit SDK v1.0.1
 import PackageDescription
 
 let package = Package(
     name: "SimKit",
     platforms: [
-        .iOS(.v14),
-        .macOS(.v12)
+        .iOS(.v13),
+        .macOS(.v10_15)
     ],
     products: [
         .library(
