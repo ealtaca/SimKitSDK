@@ -55,7 +55,11 @@ public class SimKit {
         // Register custom URLProtocol to intercept all network requests
         print("[SimKit] 🔧 Registering SimKitURLProtocol...")
         URLProtocol.registerClass(SimKitURLProtocol.self)
-        print("[SimKit] 🔧 URLProtocol registered")
+
+        // Swizzle URLSessionConfiguration to inject our protocol into all sessions
+        URLSessionConfiguration.injectSimKitProtocol()
+
+        print("[SimKit] 🔧 URLProtocol registered and injected into all configurations")
 
         // Start monitoring for UserDefaults commands from SimKit app
         userDefaultsMonitor.startMonitoring()
