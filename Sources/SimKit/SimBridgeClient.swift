@@ -24,7 +24,7 @@ class SimBridgeClient: NSObject {
     private let bundleID: String
 
     /// SDK version
-    private let sdkVersion = "1.0.1"
+    private let sdkVersion = "1.0.2"
 
     /// WebSocket task
     private var webSocket: URLSessionWebSocketTask?

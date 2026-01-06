@@ -87,9 +87,52 @@ Real-time UserDefaults editing:
 
 ## Requirements
 
-- iOS 14.0+
-- macOS 12.0+
+- iOS 13.0+
+- macOS 10.15+
 - Swift 5.9+
+
+## Configuration
+
+### Info.plist Setup
+
+Add the following to your iOS app's Info.plist to allow local networking:
+
+```xml
+<key>NSAppTransportSecurity</key>
+<dict>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+    <key>NSAllowsArbitraryLoads</key>
+    <true/>
+</dict>
+```
+
+## Troubleshooting
+
+### Connection Error: -1005 (Network connection lost)
+
+If you see `URLError code: -1005` in logs:
+
+1. **Ensure SimKit macOS app is running**
+   ```bash
+   lsof -i :47263
+   ```
+   You should see SimKit listening on port 47263.
+
+2. **Check that both apps are on the same Mac**
+   - SDK uses `127.0.0.1` (localhost)
+   - iOS Simulator and SimKit macOS app must be on the same computer
+
+3. **Verify Info.plist has ATS exceptions**
+   - Add both `NSAllowsLocalNetworking` and `NSAllowsArbitraryLoads`
+
+4. **Check macOS Firewall settings**
+   - System Settings → Network → Firewall
+   - Allow incoming connections for SimKit app
+
+5. **Only works in iOS Simulator**
+   - SDK does not work on physical devices
+   - Localhost routing only works in Simulator
 
 ## License
 
