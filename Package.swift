@@ -1,5 +1,5 @@
 // swift-tools-version:5.9
-// SimKit SDK v1.0.5
+// SimKit SDK v1.0.6
 import PackageDescription
 
 let package = Package(

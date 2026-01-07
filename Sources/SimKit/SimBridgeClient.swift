@@ -24,7 +24,7 @@ class SimBridgeClient: NSObject {
     private let bundleID: String
 
     /// SDK version
-    private let sdkVersion = "1.0.5"
+    private let sdkVersion = "1.0.6"
 
     /// WebSocket task
     private var webSocket: URLSessionWebSocketTask?
@@ -108,16 +108,20 @@ class SimBridgeClient: NSObject {
 
         // Properly close any existing WebSocket connection
         if let existingSocket = webSocket {
+            print("[SimKit] 🔧 Closing existing WebSocket before creating new one")
             existingSocket.cancel(with: .normalClosure, reason: nil)
             webSocket = nil
         }
 
         // Create new WebSocket task
+        print("[SimKit] 🔧 Creating new WebSocket task")
         let task = urlSession.webSocketTask(with: serverURL)
         webSocket = task
 
         // Resume the task to start connection
+        print("[SimKit] 🔧 Calling task.resume() to initiate WebSocket handshake")
         task.resume()
+        print("[SimKit] 🔧 task.resume() called, waiting for didOpenWithProtocol callback")
 
         // Set connection timeout - if not connected within 5 seconds, retry
         queue.asyncAfter(deadline: .now() + 5.0) { [weak self] in
@@ -125,7 +129,7 @@ class SimBridgeClient: NSObject {
             if self.isConnecting && !self.isConnected {
                 // Only log first few timeouts
                 if self.reconnectAttempts < 3 {
-                    print("[SimKit] ⏰ Connection timeout, will retry...")
+                    print("[SimKit] ⏰ Connection timeout after 5s, didOpenWithProtocol was never called")
                 }
                 self.isConnecting = false
 
