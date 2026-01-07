@@ -24,7 +24,7 @@ class SimBridgeClient: NSObject {
     private let bundleID: String
 
     /// SDK version
-    private let sdkVersion = "1.0.4"
+    private let sdkVersion = "1.0.5"
 
     /// WebSocket task
     private var webSocket: URLSessionWebSocketTask?
@@ -106,8 +106,11 @@ class SimBridgeClient: NSObject {
             print("[SimKit] 🔌 Connecting to WebSocket server at \(serverURL)... (attempt \(reconnectAttempts + 1))")
         }
 
-        // Cancel any existing task
-        webSocket?.cancel(with: .goingAway, reason: nil)
+        // Properly close any existing WebSocket connection
+        if let existingSocket = webSocket {
+            existingSocket.cancel(with: .normalClosure, reason: nil)
+            webSocket = nil
+        }
 
         // Create new WebSocket task
         let task = urlSession.webSocketTask(with: serverURL)
@@ -125,8 +128,13 @@ class SimBridgeClient: NSObject {
                     print("[SimKit] ⏰ Connection timeout, will retry...")
                 }
                 self.isConnecting = false
-                self.webSocket?.cancel(with: .goingAway, reason: nil)
-                self.webSocket = nil
+
+                // Properly close timed-out WebSocket
+                if let socket = self.webSocket {
+                    socket.cancel(with: .normalClosure, reason: nil)
+                    self.webSocket = nil
+                }
+
                 self.scheduleReconnect()
             }
         }
@@ -376,8 +384,12 @@ class SimBridgeClient: NSObject {
 
             self.isConnected = false
             self.isConnecting = false
-            self.webSocket?.cancel(with: .goingAway, reason: nil)
-            self.webSocket = nil
+
+            // Properly close WebSocket with normal closure code
+            if let socket = self.webSocket {
+                socket.cancel(with: .normalClosure, reason: nil)
+                self.webSocket = nil
+            }
 
             // Only log first disconnect
             if self.reconnectAttempts == 0 {
