@@ -24,7 +24,7 @@ class SimBridgeClient: NSObject {
     private let bundleID: String
 
     /// SDK version
-    private let sdkVersion = "1.0.2"
+    private let sdkVersion = "1.0.4"
 
     /// WebSocket task
     private var webSocket: URLSessionWebSocketTask?
@@ -100,7 +100,11 @@ class SimBridgeClient: NSObject {
         }
 
         isConnecting = true
-        print("[SimKit] 🔌 Connecting to WebSocket server at \(serverURL)... (attempt \(reconnectAttempts + 1))")
+
+        // Only log first few connection attempts to avoid spam
+        if reconnectAttempts < 3 {
+            print("[SimKit] 🔌 Connecting to WebSocket server at \(serverURL)... (attempt \(reconnectAttempts + 1))")
+        }
 
         // Cancel any existing task
         webSocket?.cancel(with: .goingAway, reason: nil)
@@ -109,18 +113,17 @@ class SimBridgeClient: NSObject {
         let task = urlSession.webSocketTask(with: serverURL)
         webSocket = task
 
-        // Log task state
-        print("[SimKit] 📡 WebSocket task created, state: \(task.state.rawValue)")
-
         // Resume the task to start connection
         task.resume()
-        print("[SimKit] 📡 WebSocket task resumed")
 
         // Set connection timeout - if not connected within 5 seconds, retry
         queue.asyncAfter(deadline: .now() + 5.0) { [weak self] in
             guard let self = self else { return }
             if self.isConnecting && !self.isConnected {
-                print("[SimKit] ⏰ Connection timeout, forcing reconnect...")
+                // Only log first few timeouts
+                if self.reconnectAttempts < 3 {
+                    print("[SimKit] ⏰ Connection timeout, will retry...")
+                }
                 self.isConnecting = false
                 self.webSocket?.cancel(with: .goingAway, reason: nil)
                 self.webSocket = nil
@@ -158,7 +161,10 @@ class SimBridgeClient: NSObject {
             delay = 5.0
         }
 
-        print("[SimKit] 🔄 Scheduling reconnect attempt \(reconnectAttempts) in \(delay)s...")
+        // Only log first few reconnect attempts and then every 10th
+        if reconnectAttempts <= 3 || reconnectAttempts % 10 == 0 {
+            print("[SimKit] 🔄 Reconnect attempt \(reconnectAttempts) scheduled in \(delay)s...")
+        }
 
         let workItem = DispatchWorkItem { [weak self] in
             self?.connect()
@@ -365,8 +371,7 @@ class SimBridgeClient: NSObject {
 
             // Skip if already handling disconnect
             guard self.isConnected || self.isConnecting else {
-                print("[SimKit] ⚠️ Already disconnected, skipping duplicate handleDisconnect")
-                return
+                return  // Silently skip duplicate disconnect
             }
 
             self.isConnected = false
@@ -374,7 +379,10 @@ class SimBridgeClient: NSObject {
             self.webSocket?.cancel(with: .goingAway, reason: nil)
             self.webSocket = nil
 
-            print("[SimKit] 📴 Disconnected from server, will attempt reconnect...")
+            // Only log first disconnect
+            if self.reconnectAttempts == 0 {
+                print("[SimKit] 📴 Disconnected from SimKit app, will retry in background")
+            }
             self.scheduleReconnect()
         }
     }
@@ -435,13 +443,11 @@ extension SimBridgeClient: URLSessionWebSocketDelegate {
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let error = error {
-            print("[SimKit] ❌ WebSocket task completed with error: \(error.localizedDescription)")
-            if let urlError = error as? URLError {
-                print("[SimKit] ❌ URLError code: \(urlError.code.rawValue)")
+            // Only log errors on first few attempts
+            if reconnectAttempts < 3 {
+                print("[SimKit] ⚠️ Connection error: \(error.localizedDescription)")
             }
             handleDisconnect()
-        } else {
-            print("[SimKit] ℹ️ WebSocket task completed without error")
         }
     }
 }
