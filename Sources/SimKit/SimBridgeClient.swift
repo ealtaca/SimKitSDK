@@ -66,6 +66,26 @@ class SimBridgeClient: NSObject {
         bundleID = Bundle.main.bundleIdentifier ?? "unknown"
         super.init()
         print("[SimKit] SimBridgeClient initialized for \(bundleID)")
+        appendLog("[SimKit] SimBridgeClient initialized for \(bundleID)")
+    }
+
+    /// Append log to file for debugging
+    private func appendLog(_ message: String) {
+        print(message)
+        let logFile = "/tmp/simkit_client_debug.log"
+        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        let logMessage = "[\(timestamp)] \(message)\n"
+        if let data = logMessage.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: logFile) {
+                if let fileHandle = FileHandle(forWritingAtPath: logFile) {
+                    fileHandle.seekToEndOfFile()
+                    fileHandle.write(data)
+                    fileHandle.closeFile()
+                }
+            } else {
+                try? data.write(to: URL(fileURLWithPath: logFile))
+            }
+        }
     }
 
     // MARK: - Connection Management
@@ -90,12 +110,12 @@ class SimBridgeClient: NSObject {
     /// Connect to the macOS server via WebSocket
     private func connect() {
         guard !isConnected else {
-            print("[SimKit] Already connected, skipping connect()")
+            appendLog("[SimKit] Already connected, skipping connect()")
             return
         }
 
         guard !isConnecting else {
-            print("[SimKit] Connection already in progress, skipping")
+            appendLog("[SimKit] Connection already in progress, skipping")
             return
         }
 
@@ -103,25 +123,25 @@ class SimBridgeClient: NSObject {
 
         // Only log first few connection attempts to avoid spam
         if reconnectAttempts < 3 {
-            print("[SimKit] 🔌 Connecting to WebSocket server at \(serverURL)... (attempt \(reconnectAttempts + 1))")
+            appendLog("[SimKit] 🔌 Connecting to WebSocket server at \(serverURL)... (attempt \(reconnectAttempts + 1))")
         }
 
         // Properly close any existing WebSocket connection
         if let existingSocket = webSocket {
-            print("[SimKit] 🔧 Closing existing WebSocket before creating new one")
+            appendLog("[SimKit] 🔧 Closing existing WebSocket before creating new one")
             existingSocket.cancel(with: .normalClosure, reason: nil)
             webSocket = nil
         }
 
         // Create new WebSocket task
-        print("[SimKit] 🔧 Creating new WebSocket task")
+        appendLog("[SimKit] 🔧 Creating new WebSocket task")
         let task = urlSession.webSocketTask(with: serverURL)
         webSocket = task
 
         // Resume the task to start connection
-        print("[SimKit] 🔧 Calling task.resume() to initiate WebSocket handshake")
+        appendLog("[SimKit] 🔧 Calling task.resume() to initiate WebSocket handshake")
         task.resume()
-        print("[SimKit] 🔧 task.resume() called, waiting for didOpenWithProtocol callback")
+        appendLog("[SimKit] 🔧 task.resume() called, waiting for didOpenWithProtocol callback")
 
         // Set connection timeout - if not connected within 5 seconds, retry
         queue.asyncAfter(deadline: .now() + 5.0) { [weak self] in
@@ -438,22 +458,21 @@ class SimBridgeClient: NSObject {
 extension SimBridgeClient: URLSessionWebSocketDelegate {
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
-        print("[SimKit] ✅ WebSocket didOpenWithProtocol called!")
-        print("[SimKit] 🔌 WebSocket connected! Protocol: \(`protocol` ?? "none")")
+        appendLog("[SimKit] ✅ WebSocket didOpenWithProtocol called! Protocol: \(`protocol` ?? "none")")
 
         queue.async { [weak self] in
             guard let self = self else { return }
             self.isConnected = true
             self.isConnecting = false
             self.reconnectAttempts = 0  // Reset on successful connection
-            print("[SimKit] 📤 Sending handshake...")
+            self.appendLog("[SimKit] 📤 Sending handshake...")
             self.sendHandshake()
         }
     }
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         let reasonStr = reason.flatMap { String(data: $0, encoding: .utf8) } ?? "none"
-        print("[SimKit] 📴 WebSocket closed with code: \(closeCode.rawValue), reason: \(reasonStr)")
+        appendLog("[SimKit] 📴 WebSocket closed with code: \(closeCode.rawValue), reason: \(reasonStr)")
         handleDisconnect()
     }
 
@@ -461,7 +480,7 @@ extension SimBridgeClient: URLSessionWebSocketDelegate {
         if let error = error {
             // Only log errors on first few attempts
             if reconnectAttempts < 3 {
-                print("[SimKit] ⚠️ Connection error: \(error.localizedDescription)")
+                appendLog("[SimKit] ⚠️ Connection error: \(error.localizedDescription)")
             }
             handleDisconnect()
         }
