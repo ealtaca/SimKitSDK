@@ -10,31 +10,28 @@
 //
 
 import Foundation
+import Network
 
 /// WebSocket client for communication with macOS SimKit app
 class SimBridgeClient: NSObject {
 
     static let shared = SimBridgeClient()
 
-    /// WebSocket server URL - iOS Simulator connects to macOS host
-    /// Note: In iOS Simulator, localhost/127.0.0.1 correctly routes to macOS host
-    private let serverURL = URL(string: "ws://127.0.0.1:47263")!
+    /// WebSocket server host and port
+    private let serverHost = "127.0.0.1"
+    private let serverPort: UInt16 = 47263
 
     /// Bundle ID of the iOS app
     private let bundleID: String
 
     /// SDK version
-    private let sdkVersion = "1.0.6"
+    private let sdkVersion = "1.0.8"
 
-    /// WebSocket task
-    private var webSocket: URLSessionWebSocketTask?
+    /// TCP connection (we handle WebSocket manually)
+    private var connection: NWConnection?
 
-    /// URL session for WebSocket
-    private lazy var urlSession: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.waitsForConnectivity = true
-        return URLSession(configuration: config, delegate: self, delegateQueue: nil)
-    }()
+    /// WebSocket handshake completed
+    private var isWebSocketHandshakeComplete = false
 
     /// Connection state
     private(set) var isConnected = false
@@ -123,48 +120,144 @@ class SimBridgeClient: NSObject {
 
         // Only log first few connection attempts to avoid spam
         if reconnectAttempts < 3 {
-            appendLog("[SimKit] 🔌 Connecting to WebSocket server at \(serverURL)... (attempt \(reconnectAttempts + 1))")
+            appendLog("[SimKit] 🔌 Connecting to \(serverHost):\(serverPort)... (attempt \(reconnectAttempts + 1))")
         }
 
-        // Properly close any existing WebSocket connection
-        if let existingSocket = webSocket {
-            appendLog("[SimKit] 🔧 Closing existing WebSocket before creating new one")
-            existingSocket.cancel(with: .normalClosure, reason: nil)
-            webSocket = nil
+        // Close any existing connection
+        if let existingConnection = connection {
+            appendLog("[SimKit] 🔧 Closing existing connection")
+            existingConnection.cancel()
+            connection = nil
         }
 
-        // Create new WebSocket task
-        appendLog("[SimKit] 🔧 Creating new WebSocket task")
-        let task = urlSession.webSocketTask(with: serverURL)
-        webSocket = task
+        // Create TCP connection
+        let host = NWEndpoint.Host(serverHost)
+        let port = NWEndpoint.Port(rawValue: serverPort)!
+        let tcpOptions = NWProtocolTCP.Options()
+        let params = NWParameters(tls: nil, tcp: tcpOptions)
 
-        // Resume the task to start connection
-        appendLog("[SimKit] 🔧 Calling task.resume() to initiate WebSocket handshake")
-        task.resume()
-        appendLog("[SimKit] 🔧 task.resume() called, waiting for didOpenWithProtocol callback")
+        let newConnection = NWConnection(host: host, port: port, using: params)
+        connection = newConnection
 
-        // Set connection timeout - if not connected within 5 seconds, retry
-        queue.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+        appendLog("[SimKit] 🔧 TCP connection created")
+
+        // Setup state handler
+        newConnection.stateUpdateHandler = { [weak self] state in
             guard let self = self else { return }
-            if self.isConnecting && !self.isConnected {
-                // Only log first few timeouts
-                if self.reconnectAttempts < 3 {
-                    print("[SimKit] ⏰ Connection timeout after 5s, didOpenWithProtocol was never called")
-                }
-                self.isConnecting = false
 
-                // Properly close timed-out WebSocket
-                if let socket = self.webSocket {
-                    socket.cancel(with: .normalClosure, reason: nil)
-                    self.webSocket = nil
-                }
+            switch state {
+            case .ready:
+                self.appendLog("[SimKit] ✅ TCP connection ready, sending WebSocket handshake")
+                self.sendWebSocketHandshake()
 
-                self.scheduleReconnect()
+            case .waiting(let error):
+                self.appendLog("[SimKit] ⏸️ Connection waiting: \(error)")
+
+            case .failed(let error):
+                self.appendLog("[SimKit] ❌ Connection failed: \(error)")
+                self.handleDisconnect()
+
+            case .cancelled:
+                self.appendLog("[SimKit] 📴 Connection cancelled")
+                self.handleDisconnect()
+
+            default:
+                break
             }
         }
 
-        // Start receiving messages (will wait for connection)
-        receiveMessage()
+        // Start connection
+        newConnection.start(queue: queue)
+        appendLog("[SimKit] 🔧 TCP connection started")
+
+        // Set connection timeout
+        queue.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+            guard let self = self else { return }
+            if self.isConnecting && !self.isConnected {
+                if self.reconnectAttempts < 3 {
+                    self.appendLog("[SimKit] ⏰ Connection timeout after 5s")
+                }
+                self.isConnecting = false
+                self.connection?.cancel()
+                self.connection = nil
+                self.scheduleReconnect()
+            }
+        }
+    }
+
+    /// Send WebSocket HTTP upgrade handshake
+    private func sendWebSocketHandshake() {
+        guard let connection = connection else { return }
+
+        // Generate random WebSocket key
+        var keyBytes = [UInt8](repeating: 0, count: 16)
+        for i in 0..<16 {
+            keyBytes[i] = UInt8.random(in: 0...255)
+        }
+        let key = Data(keyBytes).base64EncodedString()
+
+        // Build HTTP upgrade request
+        let request = "GET / HTTP/1.1\r\n" +
+                     "Host: \(serverHost):\(serverPort)\r\n" +
+                     "Upgrade: websocket\r\n" +
+                     "Connection: Upgrade\r\n" +
+                     "Sec-WebSocket-Key: \(key)\r\n" +
+                     "Sec-WebSocket-Version: 13\r\n" +
+                     "\r\n"
+
+        appendLog("[SimKit] 📤 Sending WebSocket handshake")
+
+        let requestData = request.data(using: .utf8)!
+        connection.send(content: requestData, completion: .contentProcessed { [weak self] error in
+            guard let self = self else { return }
+
+            if let error = error {
+                self.appendLog("[SimKit] ❌ Failed to send handshake: \(error)")
+                self.handleDisconnect()
+                return
+            }
+
+            self.appendLog("[SimKit] ✅ Handshake sent, waiting for response")
+            self.receiveHandshakeResponse()
+        })
+    }
+
+    /// Receive WebSocket handshake response
+    private func receiveHandshakeResponse() {
+        guard let connection = connection else { return }
+
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, context, isComplete, error in
+            guard let self = self else { return }
+
+            if let error = error {
+                self.appendLog("[SimKit] ❌ Handshake response error: \(error)")
+                self.handleDisconnect()
+                return
+            }
+
+            guard let data = data, let response = String(data: data, encoding: .utf8) else {
+                self.appendLog("[SimKit] ❌ Invalid handshake response")
+                self.handleDisconnect()
+                return
+            }
+
+            self.appendLog("[SimKit] 📥 Received handshake response")
+            self.appendLog(String(response.prefix(200)))
+
+            // Check for 101 Switching Protocols
+            if response.contains("101") && response.lowercased().contains("websocket") {
+                self.appendLog("[SimKit] ✅ WebSocket handshake successful!")
+                self.isConnected = true
+                self.isConnecting = false
+                self.isWebSocketHandshakeComplete = true
+                self.reconnectAttempts = 0
+                self.sendHandshake()
+                self.receiveWebSocketMessage()
+            } else {
+                self.appendLog("[SimKit] ❌ Invalid handshake response (not 101)")
+                self.handleDisconnect()
+            }
+        }
     }
 
     /// Disconnect from server
@@ -172,10 +265,10 @@ class SimBridgeClient: NSObject {
         guard isConnected else { return }
 
         isConnected = false
-        webSocket?.cancel(with: .goingAway, reason: nil)
-        webSocket = nil
+        connection?.cancel()
+        connection = nil
 
-        print("[SimKit] 📴 Disconnected from macOS server")
+        appendLog("[SimKit] 📴 Disconnected from macOS server")
     }
 
     /// Schedule reconnection attempt with exponential backoff
@@ -237,69 +330,148 @@ class SimBridgeClient: NSObject {
         sendMessage(message)
     }
 
-    /// Send message to server
+    /// Send message to server (manually encode WebSocket frame)
     private func sendMessage(_ message: ClientMessage) {
         queue.async { [weak self] in
-            guard let self = self, self.isConnected else { return }
+            guard let self = self, self.isConnected, let connection = self.connection else { return }
 
             do {
                 let encoder = JSONEncoder()
                 encoder.dateEncodingStrategy = .iso8601
                 let jsonData = try encoder.encode(message)
 
-                if let jsonString = String(data: jsonData, encoding: .utf8) {
-                    self.webSocket?.send(.string(jsonString)) { error in
-                        if let error = error {
-                            print("[SimKit] Failed to send message: \(error)")
-                        }
+                // Build WebSocket frame (client -> server must be masked)
+                var frame = Data()
+
+                // First byte: FIN bit + text frame opcode (0x81)
+                frame.append(0x81)
+
+                // Second byte: mask bit (1 for client) + payload length
+                let payloadLength = jsonData.count
+                if payloadLength <= 125 {
+                    frame.append(UInt8(payloadLength) | 0x80) // Set mask bit
+                } else if payloadLength <= 65535 {
+                    frame.append(126 | 0x80)
+                    frame.append(UInt8((payloadLength >> 8) & 0xFF))
+                    frame.append(UInt8(payloadLength & 0xFF))
+                } else {
+                    frame.append(127 | 0x80)
+                    for i in (0..<8).reversed() {
+                        frame.append(UInt8((payloadLength >> (i * 8)) & 0xFF))
                     }
                 }
+
+                // Masking key (4 random bytes)
+                var maskingKey = [UInt8](repeating: 0, count: 4)
+                for i in 0..<4 {
+                    maskingKey[i] = UInt8.random(in: 0...255)
+                }
+                frame.append(contentsOf: maskingKey)
+
+                // Masked payload
+                let payload = [UInt8](jsonData)
+                for (i, byte) in payload.enumerated() {
+                    frame.append(byte ^ maskingKey[i % 4])
+                }
+
+                connection.send(content: frame, completion: .contentProcessed { error in
+                    if let error = error {
+                        self.appendLog("[SimKit] ❌ Failed to send message: \(error)")
+                    }
+                })
             } catch {
-                print("[SimKit] Failed to encode message: \(error)")
+                appendLog("[SimKit] ❌ Failed to encode message: \(error)")
             }
         }
     }
 
     // MARK: - Receiving Messages
 
-    /// Receive message from WebSocket
-    private func receiveMessage() {
-        guard let webSocket = webSocket else {
-            print("[SimKit] ⚠️ WebSocket is nil, cannot receive")
+    /// Receive WebSocket message (manually decode frame)
+    private func receiveWebSocketMessage() {
+        guard let connection = connection else { return }
+
+        // Read frame header (2 bytes minimum)
+        connection.receive(minimumIncompleteLength: 2, maximumLength: 2) { [weak self] headerData, _, _, error in
+            guard let self = self else { return }
+
+            if let error = error {
+                self.appendLog("[SimKit] ❌ Receive error: \(error)")
+                self.handleDisconnect()
+                return
+            }
+
+            guard let headerData = headerData, headerData.count >= 2 else {
+                self.handleDisconnect()
+                return
+            }
+
+            let header = [UInt8](headerData)
+            let opcode = header[0] & 0x0F
+            let payloadLength = UInt64(header[1] & 0x7F)
+
+            // Handle close frame
+            if opcode == 0x08 {
+                self.appendLog("[SimKit] 📴 Received close frame")
+                self.handleDisconnect()
+                return
+            }
+
+            // Read extended length if needed
+            if payloadLength == 126 {
+                self.readExtendedLength(bytes: 2, opcode: opcode)
+            } else if payloadLength == 127 {
+                self.readExtendedLength(bytes: 8, opcode: opcode)
+            } else {
+                self.readPayload(length: Int(payloadLength), opcode: opcode)
+            }
+        }
+    }
+
+    private func readExtendedLength(bytes: Int, opcode: UInt8) {
+        guard let connection = connection else { return }
+
+        connection.receive(minimumIncompleteLength: bytes, maximumLength: bytes) { [weak self] data, _, _, error in
+            guard let self = self, let data = data, data.count == bytes else {
+                self?.handleDisconnect()
+                return
+            }
+
+            var payloadLength: UInt64 = 0
+            if bytes == 2 {
+                payloadLength = UInt64(data[0]) << 8 | UInt64(data[1])
+            } else {
+                for i in 0..<8 {
+                    payloadLength = payloadLength << 8 | UInt64(data[i])
+                }
+            }
+
+            self.readPayload(length: Int(payloadLength), opcode: opcode)
+        }
+    }
+
+    private func readPayload(length: Int, opcode: UInt8) {
+        guard let connection = connection else { return }
+
+        if length == 0 {
+            // Empty frame, continue receiving
+            self.receiveWebSocketMessage()
             return
         }
 
-        webSocket.receive { [weak self] result in
-            guard let self = self else { return }
-
-            switch result {
-            case .success(let message):
-                // If we received a message, connection is definitely open
-                if !self.isConnected {
-                    print("[SimKit] 🔌 WebSocket connection confirmed via message receipt")
-                    self.isConnected = true
-                    self.isConnecting = false
-                    self.sendHandshake()
-                }
-
-                switch message {
-                case .string(let text):
-                    if let data = text.data(using: .utf8) {
-                        self.handleReceivedData(data)
-                    }
-                case .data(let data):
-                    self.handleReceivedData(data)
-                @unknown default:
-                    break
-                }
-
-                // Continue receiving
-                self.receiveMessage()
-
-            case .failure(let error):
-                print("[SimKit] WebSocket receive error: \(error)")
-                self.handleDisconnect()
+        connection.receive(minimumIncompleteLength: length, maximumLength: length) { [weak self] data, _, _, error in
+            guard let self = self, let data = data else {
+                self?.handleDisconnect()
+                return
             }
+
+            // Server -> Client frames are NOT masked
+            if opcode == 0x01 || opcode == 0x02 { // Text or binary frame
+                self.handleReceivedData(data)
+            }
+
+            // Continue receiving
+            self.receiveWebSocketMessage()
         }
     }
 
@@ -408,12 +580,11 @@ class SimBridgeClient: NSObject {
 
             self.isConnected = false
             self.isConnecting = false
+            self.isWebSocketHandshakeComplete = false
 
-            // Properly close WebSocket with normal closure code
-            if let socket = self.webSocket {
-                socket.cancel(with: .normalClosure, reason: nil)
-                self.webSocket = nil
-            }
+            // Close connection
+            self.connection?.cancel()
+            self.connection = nil
 
             // Only log first disconnect
             if self.reconnectAttempts == 0 {
@@ -450,40 +621,6 @@ class SimBridgeClient: NSObject {
             }
         }
         return nil
-    }
-}
-
-// MARK: - URLSessionWebSocketDelegate
-
-extension SimBridgeClient: URLSessionWebSocketDelegate {
-
-    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
-        appendLog("[SimKit] ✅ WebSocket didOpenWithProtocol called! Protocol: \(`protocol` ?? "none")")
-
-        queue.async { [weak self] in
-            guard let self = self else { return }
-            self.isConnected = true
-            self.isConnecting = false
-            self.reconnectAttempts = 0  // Reset on successful connection
-            self.appendLog("[SimKit] 📤 Sending handshake...")
-            self.sendHandshake()
-        }
-    }
-
-    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
-        let reasonStr = reason.flatMap { String(data: $0, encoding: .utf8) } ?? "none"
-        appendLog("[SimKit] 📴 WebSocket closed with code: \(closeCode.rawValue), reason: \(reasonStr)")
-        handleDisconnect()
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error = error {
-            // Only log errors on first few attempts
-            if reconnectAttempts < 3 {
-                appendLog("[SimKit] ⚠️ Connection error: \(error.localizedDescription)")
-            }
-            handleDisconnect()
-        }
     }
 }
 
