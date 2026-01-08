@@ -40,7 +40,12 @@ class NetworkLogger {
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         responseBodiesDirectory = documentsPath.appendingPathComponent("simbooster_responses")
 
-        try? FileManager.default.createDirectory(at: responseBodiesDirectory, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(at: responseBodiesDirectory, withIntermediateDirectories: true)
+            print("[SimKit] 📁 Created response bodies directory: \(responseBodiesDirectory.path)")
+        } catch {
+            print("[SimKit] ❌ Failed to create response bodies directory: \(error)")
+        }
 
         // Check if requests file exists and if it's empty (clear signal from SimKit app)
         loadExistingRequests()
@@ -181,9 +186,19 @@ class NetworkLogger {
                 updatedRequest.isMocked = isMocked
                 updatedRequest.mockEndpointName = mockEndpointName
 
+                print("[SimKit] 🔍 Response size: \(updatedRequest.responseSize), data nil: \(data == nil), data empty: \(data?.isEmpty ?? true)")
+
                 // Store response body for socket (limited to 1MB)
                 if let data = data, data.count <= 1024 * 1024 {
                     updatedRequest.responseBody = data
+                    print("[SimKit] 📦 Small response: storing in responseBody (\(data.count) bytes)")
+                } else if let data = data, !data.isEmpty {
+                    // For large responses (>1MB), set placeholder file path so UI knows it exists
+                    let fileName = "\(updatedRequest.id.uuidString).dat"
+                    updatedRequest.responseBodyFilePath = fileName
+                    print("[SimKit] 📦 Large response: set responseBodyFilePath placeholder (\(data.count) bytes)")
+                } else {
+                    print("[SimKit] ⚠️ No data or data is empty for response")
                 }
 
                 if let error = error {
@@ -195,38 +210,21 @@ class NetworkLogger {
 
                 self.requests[index] = updatedRequest
 
-                // Save response body to file for large responses
-                if let data = data, !data.isEmpty {
+                // Save response body to file for large responses (synchronously)
+                if let data = data, !data.isEmpty, updatedRequest.responseBody == nil {
                     let requestId = updatedRequest.id
                     let dataSize = data.count
 
-                    if isMocked {
-                        // For mocks, save synchronously for immediate UI update
-                        let bodyFilePath = self.saveResponseBody(data, requestId: requestId)
-                        if let idx = self.requests.firstIndex(where: { $0.id == requestId }) {
-                            self.requests[idx].responseBodyFilePath = bodyFilePath
-                        }
-                        print("[SimKit] 💾 Saved mock response body (\(ByteCountFormatter.string(fromByteCount: Int64(dataSize), countStyle: .binary))) to file")
-                    } else {
-                        // For regular requests, save asynchronously to avoid blocking
-                        DispatchQueue.global(qos: .utility).async {
-                            let bodyFilePath = self.saveResponseBody(data, requestId: requestId)
-
-                            // Update the request with file path
-                            self.queue.async(flags: .barrier) {
-                                if let index = self.requests.firstIndex(where: { $0.id == requestId }) {
-                                    self.requests[index].responseBodyFilePath = bodyFilePath
-                                    // Re-write metadata with updated file path
-                                    self.writeRequestsToSharedFile()
-                                }
-                            }
-
-                            print("[SimKit] 💾 Saved response body (\(ByteCountFormatter.string(fromByteCount: Int64(dataSize), countStyle: .binary))) to file")
-                        }
+                    // Save synchronously so file is ready before macOS app tries to read it
+                    let bodyFilePath = self.saveResponseBody(data, requestId: requestId)
+                    if let idx = self.requests.firstIndex(where: { $0.id == requestId }) {
+                        self.requests[idx].responseBodyFilePath = bodyFilePath
+                        updatedRequest = self.requests[idx] // Update local copy with actual file path (with compression suffix if applied)
                     }
+                    print("[SimKit] 💾 Saved response body (\(ByteCountFormatter.string(fromByteCount: Int64(dataSize), countStyle: .binary))) to file: \(bodyFilePath ?? "nil")")
                 }
 
-                // Send to socket AND write to file
+                // Send to socket AND write to file (now with responseBodyFilePath set)
                 self.sendToSocket(updatedRequest)
                 self.writeRequestsToSharedFile()
 
@@ -319,6 +317,8 @@ class NetworkLogger {
         let fileName = "\(requestId.uuidString).dat"
         let filePath = responseBodiesDirectory.appendingPathComponent(fileName)
 
+        print("[SimKit] 💾 Attempting to save \(data.count) bytes to: \(filePath.path)")
+
         do {
             // Compress if larger than 10 KB (iOS 13+, macOS 10.15+)
             let dataToWrite: Data
@@ -332,13 +332,16 @@ class NetworkLogger {
                 } else {
                     dataToWrite = data
                     isCompressed = false
+                    print("[SimKit] ⚠️ Compression failed, saving uncompressed")
                 }
             } else {
                 dataToWrite = data
                 isCompressed = false
+                print("[SimKit] 📦 Data too small for compression, saving as-is")
             }
 
             try dataToWrite.write(to: filePath, options: [.atomic])
+            print("[SimKit] ✅ Successfully saved response to file")
 
             // Save compression flag in metadata
             if isCompressed {
@@ -347,7 +350,7 @@ class NetworkLogger {
                 return fileName
             }
         } catch {
-            print("[SimKit] ❌ Failed to save response body: \(error)")
+            print("[SimKit] ❌ Failed to save response body to \(filePath.path): \(error)")
             return ""
         }
     }

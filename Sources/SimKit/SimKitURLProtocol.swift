@@ -206,7 +206,16 @@ class SimKitURLProtocol: URLProtocol {
             networkRequest.responseBody = data
         }
 
-        SimKit.shared.logNetworkRequest(networkRequest)
+        // Use logRequestComplete to properly handle response body saving
+        NetworkLogger.shared.logRequestComplete(
+            request: request,
+            response: response,
+            data: data,
+            error: error,
+            duration: duration,
+            isMocked: isMocked,
+            mockEndpointName: mockEndpointName
+        )
     }
 }
 
